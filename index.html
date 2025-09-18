@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Simple Python Code Editor</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{
+      --bg: #0b1220;
+      --gutter: #07101a;
+      --text: #d6deeb;
+      --muted: #9aa7bf;
+      --accent: #7ee787;
+      --keyword: #ff8b50;
+      --string: #9fe6a0;
+      --comment: #6272a4;
+      --number: #ffcc66;
+      --builtin: #83aaff;
+      --selection-bg: rgba(126,231,135,0.18);
+    }
+
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial;}
+    body{background:linear-gradient(180deg,var(--bg),#041021);color:var(--text);display:flex;flex-direction:column;gap:10px;padding:14px;}
+    h1{margin:0 0 8px 0;font-size:18px;color:var(--text);}
+    .toolbar{display:flex;gap:8px;align-items:center;}
+    .toolbar button,input[type=file]{background:#0f1724;border:1px solid rgba(255,255,255,0.04);color:var(--text);padding:8px 10px;border-radius:6px;cursor:pointer}
+    .toolbar button:hover{filter:brightness(1.06)}
+    .toolbar .note{color:var(--muted);font-size:13px;margin-left:8px}
+
+    .editor-wrap{display:flex;height:72vh;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.04);box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    .gutter{
+      width:54px;background:linear-gradient(180deg,var(--gutter),#041423);color:var(--muted);padding:12px 6px 12px 10px;
+      box-sizing:border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace; font-size:13px;
+      overflow:hidden;
+    }
+    .gutter .ln{display:block;padding:0 8px;height:20px;line-height:20px;user-select:none;opacity:0.9}
+    .editor{
+      position:relative;flex:1;overflow:auto;
+      background:transparent;padding:12px 16px;box-sizing:border-box;
+    }
+
+    /* highlighted layer */
+    pre.highlight{
+      margin:0;white-space:pre;pointer-events:none; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
+      font-size:13px;line-height:20px;color:var(--text);
+      min-height:100%;
+    }
+    pre.highlight code{display:block}
+
+    /* textarea sits over highlight, transparent text to show highlight */
+    textarea.code{
+      position:absolute;top:0;left:0;right:0;bottom:0;width:100%;height:100%;
+      resize:none;background:transparent;color:transparent;caret-color:var(--text);
+      border:0;outline:0;padding:12px 16px;margin:0;font-family:inherit;font-size:13px;line-height:20px;
+      tab-size:4;overflow:auto;box-sizing:border-box;
+    }
+
+    /* syntax colors (kept subtle but distinct) */
+    .tok.keyword{color:var(--keyword);font-weight:600}
+    .tok.builtin{color:var(--builtin)}
+    .tok.string{color:var(--string)}
+    .tok.comment{color:var(--comment);font-style:italic}
+    .tok.number{color:var(--number)}
+    .tok.op{color:var(--muted)}
+    .tok.defname{color:#ffd580;font-weight:600}
+
+    /* selection overlay - works visually in highlight */
+    .highlight ::selection{background:var(--selection-bg)}
+
+    /* responsive */
+    @media (max-width:720px){
+      .editor-wrap{height:60vh}
+      .gutter{width:42px;font-size:12px}
+      textarea.code, pre.highlight{font-size:12px;line-height:18px}
+    }
+  </style>
+</head>
+<body>
+  <h1>Python Editor — Simple</h1>
+  <div class="toolbar" role="toolbar" aria-label="editor toolbar">
+    <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+      <input id="fileInput" type="file" accept=".py,text/plain" style="display:none"/>
+      <button id="openBtn" title="Open file">Open</button>
+    </label>
+    <button id="saveBtn" title="Save (Ctrl/Cmd+S)">Save</button>
+    <button id="clearBtn" title="Clear editor">Clear</button>
+    <div class="note">Tab / Shift+Tab to indent/unindent • Enter auto-indents • Ctrl/Cmd+S to save</div>
+  </div>
+
+  <div class="editor-wrap" role="region" aria-label="code editor">
+    <div class="gutter" id="gutter" aria-hidden="true"></div>
+    <div class="editor" id="editor">
+      <pre class="highlight" id="highlight"><code></code></pre>
+      <textarea spellcheck="false" class="code" id="code" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+    </div>
+  </div>
+
+  <script>
+  /* Simple Python editor JavaScript.
+     - Uses a textarea overlaid on a pre/code for syntax highlighting.
+     - Implements file open/save, auto-indent, tab/shift-tab multi-line indent/unindent.
+     - Comments in this file use /* this */ style per user preference.
+  */
+
+  /* helper: escape HTML */
+  function escHtml(s){
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  /* python keywords and builtins for highlighting */
+  const PY_KEYWORDS = [
+    "False","None","True","and","as","assert","async","await","break","class","continue","def","del","elif","else","except",
+    "finally","for","from","global","if","import","in","is","lambda","nonlocal","not","or","pass","raise","return","try","while","with","yield"
+  ];
+  const BUILTINS = [
+    "print","len","range","int","str","float","list","dict","set","tuple","open","enumerate","zip","map","filter","sum","min","max","abs",
+    "type","isinstance","super","object"
+  ];
+
+  /* Create regexes - mindful of order: strings, comments first */
+  const stringRegex = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/g;
+  const commentRegex = /(#.*?$)/gm;
+  const numberRegex = /\b(\d+(\.\d+)?)\b/g;
+  const identifierRegex = /\b([A-Za-z_][A-Za-z0-9_]*)\b/g;
+
+  const codeEl = document.getElementById('code');
+  const highlightEl = document.getElementById('highlight').querySelector('code');
+  const gutterEl = document.getElementById('gutter');
+
+  /* initial content (optional) */
+  const initial = `# Simple example
+def greet(name):
+    print(f"Hello, {name}!")
+
+for i in range(3):
+    greet("World")
+`;
+  codeEl.value = initial;
+  updateAll();
+
+  /* main highlighting function */
+  function highlightCode(text){
+    /* escape then apply syntax rules */
+    let escaped = escHtml(text);
+
+    /* handle strings first */
+    escaped = escaped.replace(stringRegex, function(m){
+      return '<span class="tok string">'+escHtml(m)+'</span>';
+    });
+
+    /* comments */
+    escaped = escaped.replace(commentRegex, function(m){
+      return '<span class="tok comment">'+escHtml(m)+'</span>';
+    });
+
+    /* numbers */
+    escaped = escaped.replace(numberRegex, '<span class="tok number">$1</span>');
+
+    /* identifiers -> keywords / builtins / def names */
+    escaped = escaped.replace(identifierRegex, function(_, id){
+      if (PY_KEYWORDS.indexOf(id) !== -1) return '<span class="tok keyword">'+id+'</span>';
+      if (BUILTINS.indexOf(id) !== -1) return '<span class="tok builtin">'+id+'</span>';
+      return id;
+    });
+
+    /* simple def detection: def <name> */
+    escaped = escaped.replace(/\bdef\s+([A-Za-z_][A-Za-z0-9_]*)/g, function(_, name){
+      return 'def <span class="tok defname">'+name+'</span>';
+    });
+
+    return escaped;
+  }
+
+  /* update highlighted layer and line numbers */
+  function updateAll(){
+    const val = codeEl.value;
+    const highlighted = highlightCode(val);
+    highlightEl.innerHTML = highlighted || '<span></span>'; /* ensure height when empty */
+
+    /* update gutter (line numbers) */
+    const lines = val.split('\n').length;
+    let out = '';
+    for (let i=1;i<=lines;i++){
+      out += '<span class="ln">'+i+'</span>';
+    }
+    gutterEl.innerHTML = out;
+
+    syncScroll();
+  }
+
+  /* sync scroll of pre and textarea */
+  function syncScroll(){
+    const pre = document.getElementById('highlight').parentElement;
+    pre.scrollTop = codeEl.scrollTop;
+    pre.scrollLeft = codeEl.scrollLeft;
+    gutterEl.scrollTop = codeEl.scrollTop;
+  }
+
+  /* auto-indent on Enter: replicate leading whitespace from previous line */
+  codeEl.addEventListener('keydown', function(e){
+    if (e.key === 'Enter'){
+      e.preventDefault();
+      const start = this.selectionStart;
+      const end = this.selectionEnd;
+      const value = this.value;
+      /* find line start */
+      const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+      const prevIndentMatch = value.slice(lineStart, start).match(/^[ \t]*/);
+      const indent = prevIndentMatch ? prevIndentMatch[0] : '';
+      /* insert newline + indent */
+      const insert = '\n' + indent;
+      this.setRangeText(insert, start, end, 'end');
+      updateAll();
+      return;
+    }
+
+    /* Tab behavior: Tab / Shift+Tab to indent / unindent selection */
+    if (e.key === 'Tab'){
+      e.preventDefault();
+      const start = this.selectionStart;
+      const end = this.selectionEnd;
+      const value = this.value;
+      const TAB = '    '; /* 4 spaces for pythonic style */
+
+      /* get the start of first selected line and end of last selected line */
+      const selStartLineStart = value.lastIndexOf('\n', start - 1) + 1;
+      const selEndLineEnd = value.indexOf('\n', end);
+      const selEnd = selEndLineEnd === -1 ? value.length : selEndLineEnd;
+
+      if (!e.shiftKey){
+        /* indent each selected line */
+        const before = value.slice(0, selStartLineStart);
+        const middle = value.slice(selStartLineStart, selEnd);
+        const after = value.slice(selEnd);
+        const newMiddle = middle.replace(/^/gm, TAB);
+        const newValue = before + newMiddle + after;
+
+        /* compute new selection */
+        const added = (newMiddle.match(/^/gm) || []).length * TAB.length;
+        const newStart = start + TAB.length;
+        const newEnd = end + added;
+        this.value = newValue;
+        this.setSelectionRange(newStart, newEnd);
+        updateAll();
+      } else {
+        /* unindent: remove up to TAB or single tab-size spaces from each line */
+        const before = value.slice(0, selStartLineStart);
+        const middle = value.slice(selStartLineStart, selEnd);
+        const after = value.slice(selEnd);
+        const newMiddle = middle.replace(/^(    |\t| {1,4})/gm, '');
+        /* compute removed length roughly by comparing lengths */
+        const removed = middle.length - newMiddle.length;
+        const newValue = before + newMiddle + after;
+
+        const newStart = Math.max(start - 4, selStartLineStart);
+        const newEnd = Math.max(end - removed, newStart);
+        this.value = newValue;
+        this.setSelectionRange(newStart, newEnd);
+        updateAll();
+      }
+    }
+
+    /* Ctrl/Cmd+S -> save */
+    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')){
+      e.preventDefault();
+      saveFile();
+    }
+  });
+
+  /* update on input / paste / cut */
+  codeEl.addEventListener('input', updateAll);
+  codeEl.addEventListener('scroll', syncScroll);
+
+  /* File open */
+  const fileInput = document.getElementById('fileInput');
+  document.getElementById('openBtn').addEventListener('click', ()=>fileInput.click());
+  fileInput.addEventListener('change', function(e){
+    const f = this.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = function(ev){
+      codeEl.value = ev.target.result.replace(/\r\n/g,'\n');
+      codeEl.setSelectionRange(0,0);
+      updateAll();
+      codeEl.focus();
+    };
+    reader.readAsText(f);
+    this.value = '';
+  });
+
+  /* Save/download */
+  function saveFile(){
+    const blob = new Blob([codeEl.value], {type:'text/x-python;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'script.py';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+  document.getElementById('saveBtn').addEventListener('click', saveFile);
+
+  /* Clear */
+  document.getElementById('clearBtn').addEventListener('click', ()=>{
+    if (confirm('Clear editor?')) {
+      codeEl.value = '';
+      updateAll();
+      codeEl.focus();
+    }
+  });
+
+  /* initialize sizes for overlay to match pre styling */
+  window.addEventListener('resize', syncScroll);
+
+  /* ensure caret stays visible in overlay (textarea visible, highlight pointer-events none) */
+  codeEl.addEventListener('click', syncScroll);
+
+  /* optional: keyboard shortcut to focus editor (Ctrl/Cmd+E) */
+  window.addEventListener('keydown', function(e){
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e'){ e.preventDefault(); codeEl.focus(); }
+  });
+
+  /* expose update function if needed elsewhere */
+  window.simplePythonEditor = { updateAll };
+  </script>
+</body>
+</html>
